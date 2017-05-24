@@ -1,0 +1,9 @@
+name = Entity Reference Dependable
+description = Entity Reference Dependable. This module provides a widget and a views display. A defined control field via the widget will decide how the data of this field to be choose.
+core = 7.x
+package = Fields
+dependencies[] = entityreference
+dependencies[] = views
+dependencies[] = ctools
+
+files[] = views/projectscopes_plugin_display.inc

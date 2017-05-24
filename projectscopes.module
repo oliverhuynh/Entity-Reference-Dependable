@@ -1,0 +1,476 @@
+<?php
+
+// 1. Attach to the correct form JS
+// 2. Adding ajax stuff to load the new field
+// 3. Render the new field via ajax
+// 4. Theme the correct widget.
+
+// Work step 1. Attach to the correct form JS
+/**
+ * Implements hook_element_info_alter().
+ * Adds an #after_build function to all form elements.
+ */
+function projectscopes_element_info_alter(&$types) {
+  foreach ($types as $type => $info) {
+    $types[$type]['#process'] = isset($types[$type]['#process']) ? $types[$type]['#process'] : array();
+    array_unshift($types[$type]['#process'], "projectscopes_element_after_build");
+  }
+}
+
+/**
+ * Implements hook_field_widget_info().
+ * Work step 4. Theme the correct widget.
+ */
+function projectscopes_field_widget_info() {
+  $widgets['projectscopes'] = array(
+    'label' => t('Entity Reference Dependable'),
+    'description' => t('A control field will decide how the data of this field to be choose.'),
+    'field types' => array(
+      'entityreference',
+      'commerce_customer_profile_reference',
+      'commerce_line_item_reference',
+      'commerce_product_reference',
+      'taxonomy_term_reference',
+    ),
+    'behaviors' => array(
+      'multiple values' => FIELD_BEHAVIOR_CUSTOM,
+      'default value' => FIELD_BEHAVIOR_NONE,
+    ),
+    'settings' => array(
+      'view' => '',
+      'pass_arguments' => '',
+      'close_modal' => '',
+      'allow_duplicates' => FALSE,
+      'rendered_entity' => FALSE,
+      'view_mode' => FALSE,
+    ),
+  );
+
+  return $widgets;
+}
+
+/**
+ * Implements hook_field_widget_settings_form().
+ */
+function projectscopes_field_widget_settings_form($field, $instance) {
+  $widget = $instance['widget'];
+  $settings = $widget['settings'];
+
+  if ($widget['type'] == 'projectscopes') {
+    $options = array();
+    $displays = views_get_applicable_views('project scopes display');
+
+    foreach ($displays as $data) {
+      list($view, $display_id) = $data;
+      $view_name = !empty($view->human_name) ? $view->human_name : $view->name;
+      $options[$view->name . '|' . $display_id] = check_plain($view_name . ' | ' . $view->display_handler->display->display_title);
+    }
+
+    $element['view'] = array(
+      '#type' => 'select',
+      '#title' => t('View'),
+      '#description' => t('Specify the View to use for selecting items. Only views that have an "Project scopes" display are shown.'),
+      '#options' => $options,
+      '#default_value' => isset($settings['view']) ? $settings['view'] : '',
+      '#required' => TRUE,
+    );
+    $element['control_field'] = array(
+      '#type' => 'textfield',
+      '#title' => t('Choose control field here'),
+      '#description' => t('Choose control field here: Ex: field_project'),
+      '#default_value' => isset($settings['control_field']) ? $settings['control_field'] : '',
+    );
+  }
+
+  return $element;
+}
+
+
+
+
+/**
+ * Implements hook_views_api().
+ */
+function projectscopes_views_api() {
+  return array(
+    'api' => 3,
+    'path' => drupal_get_path('module', 'projectscopes') . '/views',
+  );
+}
+
+/**
+ * Implements hook_theme().
+ */
+function projectscopes_theme() {
+  return array(
+    'projectscopes_widget' => array(
+      'render element' => 'widget',
+    ),
+  );
+}
+
+/**
+ * Implements hook_field_widget_form().
+ */
+function projectscopes_field_widget_form(&$form, &$form_state, $field, $instance, $langcode, $items, $delta, $element) {
+  $element['#theme'] = 'projectscopes_widget';
+  $settings = projectscopes_settings_ids($field, $form) + array(
+    'langcode' => $langcode,
+    'instance' => $instance,
+    'field' => $field,
+    'column' => key($field['columns']),
+  );
+  $settings += $instance['widget']['settings'];
+  if (strpos($field['type'], '_reference') !== FALSE) {
+    $settings['target_type'] = str_replace('_reference', '', $field['type']);
+  }
+  else {
+    $settings['target_type'] = $field['settings']['target_type'];
+  }
+  $element['#settings'] = $settings;
+
+  $entity_ids = array();
+  foreach ($items as $item) {
+    $entity_ids[] = $item[$settings['column']];
+  }
+  if (empty($settings['control_field'])) {
+    drupal_set_message("Please configure the project scopes widget properly", "error");
+    return $element;
+  }
+  $form_state['#control_field'] = $settings['control_field'];
+  $form_state['#load_field'] = $field['field_name'];
+  $default_control_value = isset($form['#entity']) && is_object($form['#entity']) && isset($form['#entity']->{$settings['control_field']}[$langcode][0]['target_id']) ? $form['#entity']->{$settings['control_field']}[$langcode][0]['target_id'] : 0;
+  $control_value = isset($form_state['values'][$settings['control_field']][$langcode][0]['target_id']) ? $form_state['values'][$settings['control_field']][$langcode][0]['target_id'] : $default_control_value;
+  $availables_ids = projectscopes_get_results($settings['view'], array($control_value));
+  $entity_ids = array_intersect($entity_ids, $availables_ids);
+  $availables_ids = is_array($entity_ids) && count($entity_ids) ? array_combine($entity_ids, $entity_ids) + $availables_ids : $availables_ids;
+  $element += projectscopes_rows($availables_ids, $entity_ids, $settings);
+
+  $element = array(
+    '#prefix' => '<div id="process-scopes-dependent-wrapper">',
+    '#suffix' => '</div>',
+    '#element_validate' => array('projectscopes_widget_validate'),
+  ) + $element;
+
+  return $element;
+}
+
+function projectscopes_element_after_build($element, &$form_state) {
+  // Ensure that the element is a field.
+  if (isset($element['#field_name'])) {
+    $field = &$element;
+  }
+  elseif (isset($element['#language'], $element[$element['#language']], $element[$element['#language']]['#field_name'])) {
+    // Some fields are wrapped in containers before processing.
+    $field = &$element[$element['#language']];
+  }
+
+  // Do not process hidden fields.
+  if ((isset($field['#access'])) && ($field['#access'] == FALSE)) {
+    return $element;
+  }
+
+  $form = &$form_state['complete form'];
+
+  // Avoid processing fields in fields_ui administration pages.
+  if (drupal_substr($form['#form_id'], 0, 9) == 'field_ui_') {
+    return $element;
+  }
+
+  $entity_type = NULL;
+  $bundle = NULL;
+  $entity = NULL;
+  $entity_id = NULL;
+  if (isset($field['#entity_type'], $field['#bundle'])) {
+    $entity_type = $field['#entity_type'];
+    $bundle = $field['#bundle'];
+    if (isset($field['#entity'])) {
+      $entity = $field['#entity'];
+    }
+  }
+  elseif (isset($form['#entity_type'], $form['#bundle'])) {
+    $entity_type = $form['#entity_type'];
+    $bundle = $form['#bundle'];
+    if (isset($form['#entity'])) {
+      $entity = $form['#entity'];
+    }
+  }
+
+  $entity_id = 0;
+  if (!empty($entity)) {
+    list($entity_id,,) = entity_extract_ids($entity_type, $entity);
+  }
+
+  // Process controlling field.
+  if (isset($form_state['#control_field']) && isset($entity) && is_object($entity) && isset($field['#field_name']) && isset($entity->type) && $field['#field_name'] === $form_state['#control_field']) {
+    if (isset($field['#name'])) {
+      // Work step 2. Adding ajax stuff to load the new field
+      $field = array(
+        '#ajax' => array(
+          'wrapper' => 'process-scopes-dependent-wrapper',
+          'callback' => 'projectscopes_ajax_callback',
+          'loadfield' => $form_state['#load_field']
+        ),
+      ) + $field;
+
+      // Copy #ajax since a bug of Drupal https://www.drupal.org/node/1153378#comment-7801417
+      if (isset($form_state['triggering_element']) && isset($form_state['triggering_element']['#field_name']) && $form_state['triggering_element']['#field_name'] === $field['#field_name']) {
+        $form_state['triggering_element']['#ajax'] = $field['#ajax'];
+      }
+    }
+    return $element;
+  }
+
+  return $element;
+}
+
+function projectscopes_ajax_callback(&$form, $form_state) {
+  $field = &$form[$form_state['triggering_element']['#ajax']['loadfield']];
+  return $field;
+}
+/**
+ * Theme function for the whole widget.
+ */
+function theme_projectscopes_widget($variables) {
+  $element = array();
+  $element['#attached']['js'][] = drupal_get_path('module', 'projectscopes') . '/projectscopes.js';
+
+  $widget = $variables['widget'];
+  $settings = $widget['#settings'];
+  $order_class = drupal_html_class($settings['element'] . '-delta-order');
+  $required = !empty($settings['instance']['required']) ? theme('form_required_marker', $variables) : '';
+
+  $header = array(
+    array(
+      'data' => '<label>' . t('!title !required', array('!title' => $widget['#title'], '!required' => $required)) . "</label>",
+      'colspan' => 2,
+      'class' => array('field-label'),
+    ),
+  );
+  if ($settings['field']['cardinality'] !== '1') {
+    $header[] = array(
+      'data' => t('Order'),
+      'class' => array('tabledrag-hide'),
+    );
+  }
+  $rows = array();
+
+  // Sort items according to '_weight' (needed when the form comes back after
+  // preview or failed validation)
+  $items = array();
+  foreach (element_children($widget) as $key) {
+      $items[] = &$widget[$key];
+  }
+  usort($items, '_field_sort_items_value_helper');
+
+  // Add the items as table rows.
+  foreach ($items as $item) {
+    $item['_weight']['#attributes']['class'] = array($order_class);
+    $delta_element = drupal_render($item['_weight']);
+    $cells = array(
+      array('data' => '', 'class' => array('field-multiple-drag')),
+      drupal_render($item),
+    );
+    if ($settings['field']['cardinality'] !== '1') {
+      $cells[] = array('data' => $delta_element, 'class' => array('delta-order'));
+    }
+    $rows[] = array(
+      'data' => $cells,
+      'class' => array('draggable'),
+    );
+  }
+
+  if (empty($rows)) {
+    $rows[][] = array(
+      'data' => t('There is no available items.'),
+      'colspan' => '3',
+    );
+  }
+
+  $output = '<div class="form-item">';
+  $form_errors = form_get_errors();
+  $classes = array('field-multiple-table');
+
+  // Add an error class to the table in case of error.
+  if (isset($form_errors[$settings['element']])) {
+    $classes[] = 'error';
+  }
+
+  $output .= theme('table', array(
+    'header' => $header,
+    'rows' => $rows,
+    'attributes' => array(
+      'id' => $settings['table_id'],
+      'class' => $classes,
+    ),
+  ));
+  $output .= $widget['#description'] ? '<div class="description">' . $widget['#description'] . '</div>' : '';
+  $output .= '</div>';
+
+  if ($settings['field']['cardinality'] !== '1') {
+    drupal_add_tabledrag($settings['table_id'], 'order', 'sibling', $order_class);
+  }
+  $element['select_all'] = array(
+    '#markup' => l(t('Select all'), '', array('attributes' => array('class' => 'projectscopes-widget-select-all'))),
+  );
+
+  return $output . drupal_render($element);
+}
+
+/**
+ * Returns a renderable array for multiple field values.
+ */
+function projectscopes_rows($available_ids, $checked_ids, $settings) {
+  $rows = array();
+  $entities = entity_load($settings['target_type'], $available_ids);
+  if (!empty($available_ids)) {
+    $max_delta = count($available_ids);
+    $weight_options = drupal_map_assoc(range(- $max_delta, $max_delta));
+    $delta = 0;
+    foreach ($available_ids as $entity_id) {
+      if (!isset($entities[$entity_id])) {
+        continue;
+      }
+      $frontend_id = drupal_html_id('edit-' . $settings['element'] . '-' . $settings['langcode'] . '-' . $delta);
+      $label = entity_label($settings['target_type'], $entities[$entity_id]);
+      $suffix = check_plain($label);
+      $name = $settings['element'] . '[' . $settings['langcode'] . '][' . $delta . ']';
+
+      $rows[] = array(
+        $settings['column'] => array(
+          '#type' => 'checkbox',
+          '#delta' => $delta,
+          '#field_suffix' => '<label class="option" for="' . $frontend_id . '">' . $suffix . '</label>',
+          '#return_value' => $entity_id,
+          '#value' => in_array($entity_id, $checked_ids) ? $entity_id : FALSE,
+          '#default_value' => in_array($entity_id, $checked_ids) ? $entity_id : FALSE,
+          '#title_display' => 'after',
+          '#name' => $name . '[' . $settings['column'] . ']',
+          '#attributes' => array(
+            'id' => $frontend_id,
+            'data-delta' => $delta,
+          ),
+        ),
+        // For some reasons, when using the weight element, when submitting the
+        // modal form the element is not displayed.
+        '_weight' => array(
+          '#type' => 'select',
+          '#options' => $weight_options,
+          '#title' => t('Weight'),
+          '#value' => $delta,
+          '#title_display' => 'invisible',
+          '#name' => $name . '[_weight]',
+          '#attributes' => array(
+            'id' => $frontend_id . '-weight',
+            'class' => array(drupal_html_class($settings['element'] . '-delta-order')),
+          ),
+        ),
+      );
+      $delta++;
+    }
+  }
+  return $rows;
+}
+
+function projectscopes_settings_ids($field, $form) {
+  // Build the path of the element.
+  $parents_path = $field['field_name'];
+  $index_parts = array();
+  if (!empty($form['#parents'])) {
+    $parents = $form['#parents'];
+    $first_parent = array_shift($parents);
+    $parents_path = $first_parent;
+    $index_parts[] = $first_parent;
+    if (!empty($parents)) {
+      $parents_path .= '[' . implode('][', $parents) . ']';
+      $index_parts = array_merge($index_parts, $parents);
+    }
+    $parents_path .= '[' . $field['field_name'] . ']';
+  }
+
+  $index_parts[] = $field['field_name'];
+  $index = implode('-', $index_parts);
+  $index = drupal_html_id($index);
+
+  return array(
+    'table_id' => $index . '-values',
+    'element' => $parents_path,
+    'index' => $index,
+  );
+}
+
+function projectscopes_get_results($view_display, $args = array()) {
+  list($view_name, $display_name) = explode('|', $view_display);
+  $view = views_get_view($view_name);
+  if (!$view || !isset($view->display[$display_name]) || !$view->access($display_name)) {
+    watchdog('projectscopes', 'The view %view_name is no longer eligible for the %field_name field.', array('%view_name' => $view_name, '%field_name' => '?'), WATCHDOG_WARNING);
+    return FALSE;
+  }
+  $view->set_arguments($args);
+  $view->set_display($display_name);
+  $view->pre_execute();
+  $view->execute();
+  $result = $view->result;
+  $return = array();
+
+  if ($result) {
+    foreach ($result as $ret) {
+      if (!isset($ret->nid)) {
+        watchdog('projectscopes', 'The view %view_name is configured wrong. Need nid as the key.', array('%view_name' => $view_name), WATCHDOG_WARNING);
+        return FALSE;
+      }
+      $return[$ret->nid] = $ret->nid;
+    }
+  }
+  return $return;
+}
+
+/**
+ * Pushes input values to form state.
+ */
+function projectscopes_widget_validate($element, &$form_state, $form) {
+  $form_parents = &$element['#array_parents'];
+  $form_state_parents = &$element['#parents'];
+
+  // Remove add more button.
+  array_pop($form_parents);
+  array_pop($form_state_parents);
+
+  // In case the user doesn't have access to this field, keep old values.
+  if (isset($element['#access']) && !$element['#access']) {
+    return;
+  }
+
+  $form_existing = drupal_array_get_nested_value($form, $form_parents);
+
+  // Modules like entityreference_prepopulate might hide or disable the field,
+  // in that case we shouldn't check for user input.
+  if (!empty($form_existing['#disabled']) || (isset($form_existing['#access']) && !$form_existing['#access'])) {
+    return;
+  }
+
+  $input = drupal_array_get_nested_value($form_state['input'], $form_state_parents);
+  $settings = $element['#settings'];
+
+  if (!empty($input)) {
+    $entity_ids = array();
+    foreach ($input as $value) {
+      if (!empty($value[$settings['column']])) {
+        $entity_ids[] = $value[$settings['column']];
+        $valid = TRUE;
+      }
+    }
+    $form_state['ervw_ids'][$settings['index']] = $entity_ids;
+  }
+  form_set_value($element, $input, $form_state);
+
+  if ($settings['instance']['required'] && empty($valid)) {
+    if (isset($form_existing['#field_parents']) && empty($form_existing['#field_parents'])) {
+      form_set_error($settings['element'], t('Field is required.'));
+    }
+    else {
+      form_error($element, t('Field is required.'));
+    }
+  }
+}
+
