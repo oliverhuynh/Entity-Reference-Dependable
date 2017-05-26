@@ -311,10 +311,15 @@ function theme_projectscopes_widget($variables) {
     drupal_add_tabledrag($settings['table_id'], 'order', 'sibling', $order_class);
   }
   $element['select_all'] = array(
+    '#weight' => -1,
     '#markup' => l(t('Select all'), '', array('attributes' => array('class' => 'projectscopes-widget-select-all'))),
   );
 
-  return $output . drupal_render($element);
+  $element['rest'] = array(
+    '#markup' => $output,
+  );
+
+  return drupal_render($element);
 }
 
 /**
