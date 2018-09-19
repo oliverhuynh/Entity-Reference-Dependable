@@ -26,6 +26,7 @@ function projectscopes_field_widget_info() {
     'label' => t('Entity Reference Dependable'),
     'description' => t('A control field will decide how the data of this field to be choose.'),
     'field types' => array(
+      'field_reference',
       'entityreference',
       'commerce_customer_profile_reference',
       'commerce_line_item_reference',
@@ -43,6 +44,9 @@ function projectscopes_field_widget_info() {
       'allow_duplicates' => FALSE,
       'rendered_entity' => FALSE,
       'view_mode' => FALSE,
+      'control_field' => '',
+      'url_argument' => '',
+      'entity_token' => '',
     ),
   );
 
@@ -79,6 +83,18 @@ function projectscopes_field_widget_settings_form($field, $instance) {
       '#title' => t('Choose control field here'),
       '#description' => t('Choose control field here: Ex: field_project'),
       '#default_value' => isset($settings['control_field']) ? $settings['control_field'] : '',
+    );
+    $element['url_argument'] = array(
+      '#type' => 'textfield',
+      '#title' => t('URL argument'),
+      '#description' => t('Leave blank to not use. Otherwise, choose a number to identify value of control field. Example: xxx.com/xxx/add/12 => value would be 2'),
+      '#default_value' => isset($settings['url_argument']) ? $settings['url_argument'] : '',
+    );
+    $element['entity_token'] = array(
+      '#type' => 'textfield',
+      '#title' => t('Use token based on this entity'),
+      '#description' => t('Leave blank to not use. Otherwise, choose a token. Please refer to tokens list in panel edit page to see more. Example: host:node:field-ticket-project:nid'),
+      '#default_value' => isset($settings['entity_token']) ? $settings['entity_token'] : '',
     );
   }
 
@@ -128,31 +144,105 @@ function projectscopes_field_widget_form(&$form, &$form_state, $field, $instance
     $settings['target_type'] = $field['settings']['target_type'];
   }
   $element['#settings'] = $settings;
-
-  $entity_ids = array();
-  foreach ($items as $item) {
-    $entity_ids[] = $item[$settings['column']];
-  }
   if (empty($settings['control_field'])) {
     drupal_set_message("Please configure the project scopes widget properly", "error");
     return $element;
   }
-  $form_state['#control_field'] = $settings['control_field'];
-  $form_state['#load_field'] = $field['field_name'];
-  $default_control_value = isset($form['#entity']) && is_object($form['#entity']) && isset($form['#entity']->{$settings['control_field']}[$langcode][0]['target_id']) ? $form['#entity']->{$settings['control_field']}[$langcode][0]['target_id'] : 0;
-  $control_value = isset($form_state['values'][$settings['control_field']][$langcode][0]['target_id']) ? $form_state['values'][$settings['control_field']][$langcode][0]['target_id'] : $default_control_value;
-  $availables_ids = projectscopes_get_results($settings['view'], array($control_value));
-  $entity_ids = array_intersect($entity_ids, $availables_ids);
-  $availables_ids = is_array($entity_ids) && count($entity_ids) ? array_combine($entity_ids, $entity_ids) + $availables_ids : $availables_ids;
-  $element += projectscopes_rows($availables_ids, $entity_ids, $settings);
+  $entity_ids = array();
+  foreach ($items as $item) {
+    if ($field['type'] == 'field_reference') {
+      // Since we need revision, entity_ids will be updated later
+      // $entity_ids[] = field_reference_key_create($item);
+    }
+    else {
+      $entity_ids[] = $item[$settings['column']];
+    }
+  }
 
+  // Get value of the control field
+  // Load from form initially
+  $default_control_value = isset($form_state['node']->{$settings['control_field']}[$langcode]) ? $form_state['node']->{$settings['control_field']}[$langcode][0]['target_id'] : -1;
+  $default_control_value = isset($element['#entity']) && is_object($element['#entity']) && isset($element['#entity']->{$settings['control_field']}[$langcode][0]['target_id']) ? $element['#entity']->{$settings['control_field']}[$langcode][0]['target_id'] : $default_control_value;
+
+  // Load from URL initially
+  if ($default_control_value === -1) {
+    if (isset($settings['url_argument']) && is_numeric($settings['url_argument'])) {
+      $url_argument = arg($settings['url_argument']);
+      if (is_numeric($url_argument)) {
+        $default_control_value = $url_argument;
+      }
+    }
+  }
+
+  // Load from entity_token
+  if ($default_control_value === -1) {
+    if (isset($settings['entity_token']) && trim($settings['entity_token']) && isset($element['#entity'])) {
+      $default_control_value = erd_load_token($settings['entity_token'], $element['#entity']);
+    }
+  }
+  $wrapper_id = drupal_html_id('erp-wrap-' . $settings['element'] . '-' . $settings['langcode']);
+
+  // Store initally
+  $form_state['erd_init'][$wrapper_id] = isset($form_state['erd_init'][$wrapper_id]) ? $form_state['erd_init'][$wrapper_id] : $default_control_value;
+
+  // Load from form_state, todo: check with field_reference
+  $control_value = isset($form_state['values'][$settings['control_field']][$langcode][0]['target_id']) ? $form_state['values'][$settings['control_field']][$langcode][0]['target_id'] : $form_state['erd_init'][$wrapper_id];
+  if ($field['type'] == 'field_reference') {
+    $raw_rows = TRUE;
+    $result = erd_views_results($settings['view'], array($control_value), $raw_rows);
+    $availables_ids = erd_field_reference_to_ids($result, $field, $langcode);
+    $labels = array();
+    foreach ($availables_ids as $id) {
+      $label = current($raw_rows);
+      next($raw_rows);
+      $labels[$id] = $label;
+    }
+    $cur_vid = current($result);
+    $cur_vid = _erd_find_key($cur_vid, 'vid');
+    foreach ($items as $item) {
+      $item['delta'] = isset($item['delta']) && $item['delta'] ? $item['delta'] : 0;
+      $item['revision_id'] = $cur_vid;
+      $entity_ids[] = field_reference_key_create($item);
+    }
+  }
+  else {
+    $availables_ids = projectscopes_get_results($settings['view'], array($control_value));
+  }
+  $entity_ids = array_intersect($entity_ids, $availables_ids);
+  if ($field['type'] == 'field_reference') {
+    $element += projectscopes_rows($availables_ids, $entity_ids, $settings, $labels);
+  }
+  else {
+    $availables_ids = is_array($entity_ids) && count($entity_ids) ? array_combine($entity_ids, $entity_ids) + $availables_ids : $availables_ids;
+    $element += projectscopes_rows($availables_ids, $entity_ids, $settings, erd_labels($availables_ids, $settings));
+  }
+
+  $form_state['#erp'][] = array(
+    'wrapper_id' => $wrapper_id,
+    'control_field' => $settings['control_field'],
+    'load_field' => $field['field_name'],
+    'field_parents' => $element['#field_parents'],
+  );
   $element = array(
-    '#prefix' => '<div id="process-scopes-dependent-wrapper">',
+    '#prefix' => '<div id="'. $wrapper_id .'">',
     '#suffix' => '</div>',
     '#element_validate' => array('projectscopes_widget_validate'),
   ) + $element;
 
   return $element;
+}
+
+function _erd_find_key($item, $find_key) {
+  if (!$item) {
+    return FALSE;
+  }
+
+  foreach ($item as $k => $v) {
+    if (strpos($k, $find_key) !== FALSE) {
+      return $v;
+    }
+  }
+  return FALSE;
 }
 
 function projectscopes_element_after_build($element, &$form_state) {
@@ -163,6 +253,9 @@ function projectscopes_element_after_build($element, &$form_state) {
   elseif (isset($element['#language'], $element[$element['#language']], $element[$element['#language']]['#field_name'])) {
     // Some fields are wrapped in containers before processing.
     $field = &$element[$element['#language']];
+  }
+  else {
+    return $element;
   }
 
   // Do not process hidden fields.
@@ -188,11 +281,11 @@ function projectscopes_element_after_build($element, &$form_state) {
       $entity = $field['#entity'];
     }
   }
-  elseif (isset($form['#entity_type'], $form['#bundle'])) {
-    $entity_type = $form['#entity_type'];
-    $bundle = $form['#bundle'];
-    if (isset($form['#entity'])) {
-      $entity = $form['#entity'];
+  elseif (isset($element['#entity_type'], $element['#bundle'])) {
+    $entity_type = $element['#entity_type'];
+    $bundle = $element['#bundle'];
+    if (isset($element['#entity'])) {
+      $entity = $element['#entity'];
     }
   }
 
@@ -202,20 +295,22 @@ function projectscopes_element_after_build($element, &$form_state) {
   }
 
   // Process controlling field.
-  if (isset($form_state['#control_field']) && isset($entity) && is_object($entity) && isset($field['#field_name']) && isset($entity->type) && $field['#field_name'] === $form_state['#control_field']) {
-    if (isset($field['#name'])) {
-      // Work step 2. Adding ajax stuff to load the new field
-      $field = array(
-        '#ajax' => array(
-          'wrapper' => 'process-scopes-dependent-wrapper',
-          'callback' => 'projectscopes_ajax_callback',
-          'loadfield' => $form_state['#load_field']
-        ),
-      ) + $field;
+  if ($erps = is_erp_control_field($form_state, $field)) {
+    foreach ($erps as $erp) {
+      if (isset($field['#name'])) {
+        // Work step 2. Adding ajax stuff to load the new field
+        $field = array(
+          '#ajax' => array(
+            'wrapper' => $erp['wrapper_id'],
+            'callback' => 'projectscopes_ajax_callback',
+          ),
+        ) + $field;
 
-      // Copy #ajax since a bug of Drupal https://www.drupal.org/node/1153378#comment-7801417
-      if (isset($form_state['triggering_element']) && isset($form_state['triggering_element']['#field_name']) && $form_state['triggering_element']['#field_name'] === $field['#field_name']) {
-        $form_state['triggering_element']['#ajax'] = $field['#ajax'];
+        // Copy #ajax since a bug of Drupal https://www.drupal.org/node/1153378#comment-7801417
+        if (isset($form_state['triggering_element']) && isset($form_state['triggering_element']['#field_name']) && $form_state['triggering_element']['#field_name'] === $field['#field_name']) {
+          $form_state['triggering_element']['#ajax'] = $field['#ajax'];
+        }
+        $form_state['triggering_element']['#erp'][] = $erp;
       }
     }
     return $element;
@@ -224,9 +319,29 @@ function projectscopes_element_after_build($element, &$form_state) {
   return $element;
 }
 
+function is_erp_control_field($form_state, $field) {
+  if (!isset($form_state['#erp'])) {
+    return FALSE;
+  }
+  $out = array();
+  foreach ($form_state['#erp'] as $erp) {
+    if ($field['#field_name'] === $erp['control_field']) {
+      $out[] = $erp;
+    }
+  }
+  return $out;
+}
+
 function projectscopes_ajax_callback(&$form, $form_state) {
-  $field = &$form[$form_state['triggering_element']['#ajax']['loadfield']];
-  return $field;
+  $commands = array();
+  foreach ($form_state['triggering_element']['#erp'] as $erp) {
+    $load_field_form = &drupal_array_get_nested_value($form, $erp['field_parents']);
+    $loadfield = isset($load_field_form[$erp['load_field']]) ? $load_field_form[$erp['load_field']] : FALSE;
+    if (isset($loadfield) && $loadfield) {
+      $commands[] = ajax_command_replace('#' . $erp['wrapper_id'], drupal_render_children($loadfield));
+    }
+  }
+  return array('#type' => 'ajax', '#commands' => $commands);
 }
 /**
  * Theme function for the whole widget.
@@ -322,25 +437,33 @@ function theme_projectscopes_widget($variables) {
   return drupal_render($element);
 }
 
+function erd_labels($available_ids, $settings) {
+  $entities = entity_load($settings['target_type'], $available_ids);
+  $suffixes = array();
+  foreach ($available_ids as $entity_id) {
+    if (!isset($entities[$entity_id])) {
+      continue;
+    }
+    $label = entity_label($settings['target_type'], $entities[$entity_id]);
+    $suffix = check_plain($label);
+    $suffixes[$entity_id] = $suffix;
+  }
+  return $suffixes;
+}
+
 /**
  * Returns a renderable array for multiple field values.
  */
-function projectscopes_rows($available_ids, $checked_ids, $settings) {
+function projectscopes_rows($available_ids, $checked_ids, $settings, $suffixes) {
   $rows = array();
-  $entities = entity_load($settings['target_type'], $available_ids);
   if (!empty($available_ids)) {
     $max_delta = count($available_ids);
     $weight_options = drupal_map_assoc(range(- $max_delta, $max_delta));
     $delta = 0;
     foreach ($available_ids as $entity_id) {
-      if (!isset($entities[$entity_id])) {
-        continue;
-      }
       $frontend_id = drupal_html_id('edit-' . $settings['element'] . '-' . $settings['langcode'] . '-' . $delta);
-      $label = entity_label($settings['target_type'], $entities[$entity_id]);
-      $suffix = check_plain($label);
       $name = $settings['element'] . '[' . $settings['langcode'] . '][' . $delta . ']';
-
+      $suffix = $suffixes[$entity_id];
       $rows[] = array(
         $settings['column'] => array(
           '#type' => 'checkbox',
@@ -405,6 +528,34 @@ function projectscopes_settings_ids($field, $form) {
 }
 
 function projectscopes_get_results($view_display, $args = array()) {
+  $result = erd_views_results($view_display, $args);
+  return (erd_views_results_to_ids($result));
+}
+
+function erd_field_reference_to_ids($result, $field, $langcode) {
+  $out = array();
+  // Rebuild results to field_reference
+  foreach ($result as $item) {
+    // $settings['fields']['node']['project']['field_project_ship_address']
+    $field_r_name_key = key($field['settings']['fields']);
+    $field_r_name = current($field['settings']['fields']);
+    $field_r_name = current($field_r_name);
+    $field_r_name = current($field_r_name);
+    $field_reference = array(
+      'field_key' => $field_r_name,
+      'entity_type' => $field_r_name_key,
+      'entity_id' => _erd_find_key($item, 'nid'),
+      'revision_id' => _erd_find_key($item, 'vid'),
+      'language' => $langcode,
+      'delta' => _erd_find_key($item, 'delta'),
+    );
+    $out[] = field_reference_key_create($field_reference);
+  }
+
+  return $out;
+}
+
+function erd_views_results($view_display, $args = array(), &$rows_raw = array()) {
   list($view_name, $display_name) = explode('|', $view_display);
   $view = views_get_view($view_name);
   if (!$view || !isset($view->display[$display_name]) || !$view->access($display_name)) {
@@ -415,7 +566,30 @@ function projectscopes_get_results($view_display, $args = array()) {
   $view->set_display($display_name);
   $view->pre_execute();
   $view->execute();
-  $result = $view->result;
+  if ($rows_raw) {
+    $output = $view->display_handler->preview();
+    $rows_raw = table_to_rows($output);
+  }
+  return $view->result;
+}
+
+function table_to_rows($out) {
+  $DOM = new DOMDocument();
+	$DOM->loadHTML('<html><body>'. $out .'</body></html>');
+  $trs = $DOM->getElementsByTagName('tr');
+  $ret = array();
+  foreach ($trs as $tr) {
+    $t1 = $tr->ownerDocument->saveHTML($tr);
+    $t2 = $tr->C14N();
+    $t = trim(strip_tags($t1)) ? $t1 : $t2;
+    $t = str_replace(array("<tr ", "tr>", "<td ", "td>"), array("<div ", "div>", "<div ", "div>"), $t);
+    $ret[] = $t;
+  }
+  unset($ret[0]);
+  return $ret;
+}
+
+function erd_views_results_to_ids($result) {
   $return = array();
 
   if ($result) {
@@ -477,5 +651,31 @@ function projectscopes_widget_validate($element, &$form_state, $form) {
       form_error($element, t('Field is required.'));
     }
   }
+  /*
+  TODO: Fix validate checkboxes are empty.
+  // form_set_error("", "Fix validate please");
+
+  // Fix validate wrong
+  $errors = form_get_errors();
+  if ($errors) {
+    if ($errors) {
+      // unset($input[LANGUAGE_NONE][1]);
+      // $element['#value'] = $input;
+      // dsm(array($input));
+    }
+    else {
+      // Should we remove #value here?
+    }
+  }*/
 }
 
+
+function erd_load_token($token, $entity) {
+  if (!$entity) {
+    return -1;
+  }
+  $type = isset($entity->mail) && isset($entity->name) && isset($entity->uid) ? 'user' : 'field_collection_item';
+  $type = isset($entity->nid) && isset($entity->type) ? 'node' : $type;
+  $values = token_generate($type, array($token => $token), array($type => $entity), array());
+  return isset($values[$token]) ? $values[$token] : -1;
+}

@@ -1,0 +1,33 @@
+ field_reference.module | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/field_reference.module b/field_reference.module
+index f794c33..88988d6 100644
+--- a/field_reference.module
++++ b/field_reference.module
+@@ -339,6 +339,7 @@ function field_reference_field_formatter_view($entity_type, $entity, $field, $in
+       break;
+   }
+ 
++
+   foreach ($items as $delta => $item) {
+     $field_entity_type = !empty($item['entity_type']) ? $item['entity_type'] : $entity_type;
+ 
+@@ -355,7 +356,8 @@ function field_reference_field_formatter_view($entity_type, $entity, $field, $in
+ 
+     if ($field_entity) {
+       $field_language = !empty($item['language']) ? $item['language'] : $langcode;
+-      if (isset($item['delta']) && !is_null($item['delta'])) {
++      if (isset($field['settings']['granularity']['value']) && $field['settings']['granularity']['value']) {
++        $item['delta'] = isset($item['delta']) && $item['delta'] ? $item['delta'] : 0;
+         $field_items = field_get_items($field_entity_type, $field_entity, $item['field_key'], $field_language);
+         if (!empty($field_items[$item['delta']])) {
+           $result[$item['delta']] = field_view_value($field_entity_type, $field_entity, $item['field_key'], $field_items[$item['delta']], $field_display, $field_language);
+@@ -378,7 +380,6 @@ function field_reference_field_formatter_view($entity_type, $entity, $field, $in
+     else {
+       $result[$delta] = array('#markup' => '<em>' . t('No longer available') . '</em>');
+     }
+-
+   }
+   return $result;
+ }
